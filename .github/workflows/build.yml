@@ -1,0 +1,182 @@
+name: Build Utility Mod
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.2.1
+      - name: Create project files
+        run: |
+          cat > build.gradle <<'EOF_FILE'
+          plugins {
+              id 'fabric-loom' version "${loom_version}"
+              id 'maven-publish'
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+              archivesName = project.archives_base_name
+          }
+
+          repositories {}
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": inputs.properties.version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+          }
+
+          java {
+              withSourcesJar()
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          EOF_FILE
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2G
+          org.gradle.parallel=true
+
+          minecraft_version=1.21.11
+          yarn_mappings=1.21.11+build.4
+          loader_version=0.18.4
+          loom_version=1.14-SNAPSHOT
+
+          mod_version=1.0.0
+          maven_group=com.example
+          archives_base_name=utilitymod
+
+          fabric_version=0.141.1+1.21.11
+          EOF_FILE
+          cat > settings.gradle <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          EOF_FILE
+          mkdir -p src/main/resources
+          cat > src/main/resources/fabric.mod.json <<'EOF_FILE'
+          {
+            "schemaVersion": 1,
+            "id": "utilitymod",
+            "version": "${version}",
+            "name": "Utility Mod",
+            "description": "Команды /heal, /feed, /repair и /sun для выживания и тестов.",
+            "authors": ["You"],
+            "license": "MIT",
+            "environment": "*",
+            "entrypoints": {
+              "main": ["com.example.utilitymod.UtilityMod"]
+            },
+            "depends": {
+              "fabricloader": ">=0.18.0",
+              "minecraft": "~1.21.11",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF_FILE
+          mkdir -p src/main/java/com/example/utilitymod
+          cat > src/main/java/com/example/utilitymod/UtilityMod.java <<'EOF_FILE'
+          package com.example.utilitymod;
+
+          import net.fabricmc.api.ModInitializer;
+          import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+          import net.minecraft.item.ItemStack;
+          import net.minecraft.server.command.CommandManager;
+          import net.minecraft.server.command.ServerCommandSource;
+          import net.minecraft.server.network.ServerPlayerEntity;
+          import net.minecraft.text.Text;
+
+          public class UtilityMod implements ModInitializer {
+
+              @Override
+              public void onInitialize() {
+                  CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+
+                      // /heal — полное здоровье и сытость
+                      dispatcher.register(CommandManager.literal("heal")
+                          .requires(CommandManager.requirePermissionLevel(CommandManager.GAMEMASTERS_CHECK))
+                          .executes(ctx -> {
+                              ServerPlayerEntity p = ctx.getSource().getPlayerOrThrow();
+                              p.setHealth(p.getMaxHealth());
+                              p.getHungerManager().setFoodLevel(20);
+                              p.getHungerManager().setSaturationLevel(20.0f);
+                              ctx.getSource().sendFeedback(() -> Text.literal("Вы исцелены!"), false);
+                              return 1;
+                          }));
+
+                      // /feed — только сытость
+                      dispatcher.register(CommandManager.literal("feed")
+                          .requires(CommandManager.requirePermissionLevel(CommandManager.GAMEMASTERS_CHECK))
+                          .executes(ctx -> {
+                              ServerPlayerEntity p = ctx.getSource().getPlayerOrThrow();
+                              p.getHungerManager().setFoodLevel(20);
+                              p.getHungerManager().setSaturationLevel(20.0f);
+                              ctx.getSource().sendFeedback(() -> Text.literal("Голод утолён!"), false);
+                              return 1;
+                          }));
+
+                      // /repair — чинит предмет в основной руке
+                      dispatcher.register(CommandManager.literal("repair")
+                          .requires(CommandManager.requirePermissionLevel(CommandManager.GAMEMASTERS_CHECK))
+                          .executes(ctx -> {
+                              ServerPlayerEntity p = ctx.getSource().getPlayerOrThrow();
+                              ItemStack stack = p.getMainHandStack();
+                              if (stack.isEmpty() || !stack.isDamageable()) {
+                                  ctx.getSource().sendError(Text.literal("В руке нет предмета с прочностью."));
+                                  return 0;
+                              }
+                              stack.setDamage(0);
+                              ctx.getSource().sendFeedback(() -> Text.literal("Предмет починен!"), false);
+                              return 1;
+                          }));
+
+                      // /sun — ясная погода и день (через ванильные команды, чтобы не зависеть от смены API времени в 1.21.11)
+                      dispatcher.register(CommandManager.literal("sun")
+                          .requires(CommandManager.requirePermissionLevel(CommandManager.GAMEMASTERS_CHECK))
+                          .executes(ctx -> {
+                              ServerCommandSource src = ctx.getSource();
+                              var cm = src.getServer().getCommandManager();
+                              cm.parseAndExecute(src.withSilent(), "time set day");
+                              cm.parseAndExecute(src.withSilent(), "weather clear");
+                              src.sendFeedback(() -> Text.literal("Наступил солнечный день."), true);
+                              return 1;
+                          }));
+                  });
+              }
+          }
+          EOF_FILE
+      - name: Build
+        run: gradle build --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: utilitymod-jar
+          path: |
+            build/libs/*.jar
+            !build/libs/*-sources.jar
